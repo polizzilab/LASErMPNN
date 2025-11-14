@@ -1759,21 +1759,6 @@ class LigandMPNNDatasetSampler(Sampler):
             Returns:
             - dict: A dictionary containing the filtered clusters.
         """
-
-        if self.is_train:
-            output2 = defaultdict(lambda: defaultdict(list))
-            for cluster, subcluster_dict in self.subclusters_info.items():
-                if cluster in self.cluster_to_chains:
-                    for subcluster_centroid, subcluster_list in subcluster_dict.items():
-                        for subcluster_entry in subcluster_list:
-                            if subcluster_entry in self.cluster_to_chains[cluster] and subcluster_entry in self.dataset.chain_key_to_index:
-                                output2[cluster][subcluster_centroid].append(subcluster_entry)
-            return self.cluster_to_chains, output2
-        else:
-            return  {}, {}
-        raise NotImplementedError
-
-
         test_metal = ["1dwh", "1e4m", "1e6s", "1e72", "1f35", "1fee", "1job", "1lqk", "1m5e", "1m5f", "1moj", "1mxy", "1mxz", "1my1", "1nki", "1qum", "1sgf", "1t31", "1u3e", "2bdh", "2bx2", "2cfv", "2e6c", "2nq9", "2nqj", "2nz6", "2ou7", "2vxx", "2zwn", "3bvx", "3cv5", "3f4v", "3f5l", "3fgg", "3hg9", "3hkn", "3hkt", "3i9z", "3k7r", "3l24", "3l7t", "3m7p", "3mi9", "3o1u", "3u92", "3u93", "3u94", "3won", "4aoj", "4dy1", "4hzt", "4i0f", "4i0j", "4i0z", "4i11", "4i12", "4jd1", "4naz", "4wd8", "4x68", "5f55", "5f56", "5fgs", "5hez", "5i4j", "5l70", "5vde", "6a4x", "6buu", "6cyt", "6iv2", "6lkp", "6lrd", "6wdz", "6x75", "7dnr", "7e34", "7kii", "7n7g", "7s7l", "7s7m", "7w5e", "7wb2"]
         test_nucleic = ["1a0a", "1am9", "1an4", "1b01", "1bc7", "1bc8", "1di2", "1ec6", "1hlo", "1hlv", "1i3j", "1pvi", "1qum", "1sfu", "1u3e", "1xpx", "1yo5", "1zx4", "2c5r", "2c62", "2nq9", "2o4a", "2p5l", "2xdb", "2ypb", "2zhg", "2zio", "3adl", "3bsu", "3fc3", "3g73", "3gna", "3gx4", "3lsr", "3mj0", "3mva", "3n7q", "3olt", "3vok", "3vwb", "3zp5", "4ato", "4bhm", "4bqa", "4e0p", "4nid", "4wal", "5cm3", "5haw", "5mht", "5vc9", "5w9s", "5ybd", "6bjv", "6dnw", "6fqr", "6gdr", "6kbs", "6lff", "6lmj", "6od4", "6wdz", "6x70", "6y93", "7bca", "7c0g", "7el3", "7jsa", "7ju3", "7kii", "7kij", "7mtl", "7z0u", "8dwm"]
 
@@ -1849,6 +1834,344 @@ class LigandMPNNDatasetSampler(Sampler):
 
         return output, output2
         
+    
+    def sample_clusters(self) -> None:
+        """
+        Randomly samples clusters from the dataset for the next epoch.
+        Updates the self.curr_samples list with new samples.
+        """
+        self.curr_samples = []
+        # Loop over mmseqs cluster and list of chains for that cluster.
+        for cluster, subclusters in self.subclusters_info.items():
+            # Get the subclusters to sample from.
+            subcluster_sample_index = int(torch.randint(0, len(subclusters), (1,), generator=self.generator).item())
+            subcluster_key = list(subclusters.keys())[subcluster_sample_index]
+
+            # Sample a chain from the subcluster.
+            subcluster_element_sampler_index = int(torch.randint(0, len(subclusters[subcluster_key]), (1,), generator=self.generator).item())
+            subcluster_element_key = subclusters[subcluster_key][subcluster_element_sampler_index]
+
+            # Yield the index of the sampled pdb_assembly-seg-chain.
+            self.curr_samples.append(self.dataset.chain_key_to_index[subcluster_element_key])
+
+    def construct_batches(self):
+        """
+        Batches by size inspired by:
+            https://pytorch.org/docs/stable/data.html#torch.utils.data.Sampler:~:text=%3E%3E%3E%20class%20AccedingSequenceLengthBatchSampler
+        """
+        # Reset the current batches.
+        self.curr_batches = []
+
+        # Sort the samples by size.
+        curr_samples_tensor = torch.tensor(self.curr_samples)
+        sizes = torch.tensor([self.dataset.index_to_complex_size[x] for x in self.curr_samples])
+        size_sort_indices = torch.argsort(sizes)
+
+        # iterate through the samples in order of size, create batches of size batch_size.
+        debug_sizes = []
+        curr_list_sample_indices, curr_list_sizes = [], []
+        for curr_size_sort_index in size_sort_indices:
+            # Get current sample index and size.
+            curr_sample_index = curr_samples_tensor[curr_size_sort_index].item()
+            curr_size = sizes[curr_size_sort_index].item()
+
+            # Add to the current batch if would not exceed batch size otherwise create a new batch.
+            if sum(curr_list_sizes) + curr_size <= self.batch_size:
+                curr_list_sample_indices.append(curr_sample_index)
+                curr_list_sizes.append(curr_size)
+            else:
+                # Add the current batch to the list of batches.
+                self.curr_batches.append(curr_list_sample_indices)
+                debug_sizes.append(sum(curr_list_sizes))
+
+                # Reset the current batch.
+                curr_list_sizes = [curr_size]
+                curr_list_sample_indices = [curr_sample_index]
+
+        # Store any remaining samples.
+        if len(curr_list_sample_indices) > 0:
+            self.curr_batches.append(curr_list_sample_indices)
+            debug_sizes.append(sum(curr_list_sizes))
+
+        # Shuffle the batches.
+        if self.shuffle:
+            shuffle_indices = torch.randperm(len(self.curr_batches), generator=self.generator).tolist()
+            curr_batches_ = [self.curr_batches[x] for x in shuffle_indices]
+            self.curr_batches = curr_batches_
+
+        # Sanity check that we have the correct number of samples after iteration.
+        assert sum(debug_sizes) == sizes.sum().item(), "Mismatch between number of samples and expected size of samples."
+
+    def __iter__(self):
+        # Yield the batches we created.
+        for batch in self.curr_batches:
+            yield batch
+
+        # Resample for the next epoch, and create new batches.
+        self.sample_clusters()
+        self.construct_batches()
+
+
+def read_flat_csv(path):
+    with open(path, 'r') as f:
+        lines = f.read().strip().split(',')
+    return [x.lower() for x in lines]
+
+
+class SolubleDatasetSampler(Sampler):
+    def __init__(
+        self, dataset: UnclusteredProteinChainDataset, params: dict, is_train: bool, seed: Optional[int] = None, 
+        max_protein_length: int = 10_000, subset_pdb_code_list: Optional[list] = None
+    ):
+        # Set the random seed for reproducibility and consistent randomness between processes if parallelized.
+        if seed is None:
+            self.generator = torch.Generator(device='cpu')
+        else:
+            self.generator = torch.Generator().manual_seed(seed)
+
+        # The unclustered dataset where each complex/assembly is a single index.
+        self.dataset = dataset
+        self.batch_size = params['batch_size']
+        self.shuffle = params['sample_randomly']
+        self.max_protein_length = max_protein_length
+        self.subset_pdbs = subset_pdb_code_list
+
+        # Load the cluster data.
+        sequence_clusters = pd.read_pickle(params['clustering_dataframe_path'])
+        self.subclusters_info = pd.read_pickle(params['subcluster_pickle_path'])
+
+        self.membrane_pdb_codes = set(
+            read_flat_csv('/home/nickhedu/programs/LASErMPNN/membrane_pdbs_chunk1.csv') + 
+            read_flat_csv('/home/nickhedu/programs/LASErMPNN/membrane_pdbs_chunk2.csv')
+        )
+
+        self.is_train = is_train
+        self.train_codes = ligandmpnn_training_pdb_codes
+        self.val_codes = ligandmpnn_validation_pdb_codes
+        self.test_codes = ligandmpnn_test_pdb_codes
+
+        # Maps sequence cluster to number of chains and vice versa
+        self.chain_to_cluster = sequence_clusters.set_index('chain').to_dict()['cluster_representative']
+        self.cluster_to_chains = invert_dict(self.chain_to_cluster)
+        
+        # Load relevant pickled sets of cluster keys, filter for train/test as necessary.
+        self.cluster_to_chains, self.subclusters_info = self.filter_clusters()
+
+        # Sample for the first epoch, subsequent epochs will resample after iteration over samples is complete.
+        self.curr_samples = []
+        self.sample_clusters()
+
+        self.curr_batches = []
+        self.construct_batches()
+
+    def __len__(self) -> int:
+        """
+        Returns number of batches in the current epoch.
+        """
+        return len(self.curr_batches)
+
+    def filter_clusters(self) -> Tuple[dict, dict]:
+        """
+        Filter clusters based on the given dataset sampler and the max protein length.
+            Parameters:
+            - is_test_dataset_sampler (bool): True if the dataset sampler is for the test dataset, False otherwise.
+
+            Returns:
+            - dict: A dictionary containing the filtered clusters.
+
+        """
+
+        print(len(self.subclusters_info), "clusters before filtering for soluble proteins.")
+        contaminated_clusters = []
+        if self.is_train:
+            output2 = defaultdict(lambda: defaultdict(list))
+            for cluster, subcluster_dict in self.subclusters_info.items():
+                if cluster in self.cluster_to_chains:
+                    for subcluster_centroid, subcluster_list in subcluster_dict.items():
+                        for subcluster_entry in subcluster_list:
+                            # Ensure chain is in the dataset, not a membrane protein, and below max length.
+                            if subcluster_entry in self.cluster_to_chains[cluster] and subcluster_entry in self.dataset.chain_key_to_index and not subcluster_entry.split('_')[0] in self.membrane_pdb_codes:
+                                output2[cluster][subcluster_centroid].append(subcluster_entry)
+                            elif subcluster_entry.split('_')[0] in self.membrane_pdb_codes:
+                                contaminated_clusters.append(cluster)
+
+            for cluster in contaminated_clusters:
+                if cluster in output2:
+                    del output2[cluster]
+            
+            print(len(output2), "clusters after filtering for soluble proteins.")
+            return self.cluster_to_chains, output2
+        else:
+            # No test set.
+            return  {}, {}
+    
+    def sample_clusters(self) -> None:
+        """
+        Randomly samples clusters from the dataset for the next epoch.
+        Updates the self.curr_samples list with new samples.
+        """
+        self.curr_samples = []
+        # Loop over mmseqs cluster and list of chains for that cluster.
+        for cluster, subclusters in self.subclusters_info.items():
+            # Get the subclusters to sample from.
+            subcluster_sample_index = int(torch.randint(0, len(subclusters), (1,), generator=self.generator).item())
+            subcluster_key = list(subclusters.keys())[subcluster_sample_index]
+
+            # Sample a chain from the subcluster.
+            subcluster_element_sampler_index = int(torch.randint(0, len(subclusters[subcluster_key]), (1,), generator=self.generator).item())
+            subcluster_element_key = subclusters[subcluster_key][subcluster_element_sampler_index]
+
+            # Yield the index of the sampled pdb_assembly-seg-chain.
+            self.curr_samples.append(self.dataset.chain_key_to_index[subcluster_element_key])
+
+    def construct_batches(self):
+        """
+        Batches by size inspired by:
+            https://pytorch.org/docs/stable/data.html#torch.utils.data.Sampler:~:text=%3E%3E%3E%20class%20AccedingSequenceLengthBatchSampler
+        """
+        # Reset the current batches.
+        self.curr_batches = []
+
+        # Sort the samples by size.
+        curr_samples_tensor = torch.tensor(self.curr_samples)
+        sizes = torch.tensor([self.dataset.index_to_complex_size[x] for x in self.curr_samples])
+        size_sort_indices = torch.argsort(sizes)
+
+        # iterate through the samples in order of size, create batches of size batch_size.
+        debug_sizes = []
+        curr_list_sample_indices, curr_list_sizes = [], []
+        for curr_size_sort_index in size_sort_indices:
+            # Get current sample index and size.
+            curr_sample_index = curr_samples_tensor[curr_size_sort_index].item()
+            curr_size = sizes[curr_size_sort_index].item()
+
+            # Add to the current batch if would not exceed batch size otherwise create a new batch.
+            if sum(curr_list_sizes) + curr_size <= self.batch_size:
+                curr_list_sample_indices.append(curr_sample_index)
+                curr_list_sizes.append(curr_size)
+            else:
+                # Add the current batch to the list of batches.
+                self.curr_batches.append(curr_list_sample_indices)
+                debug_sizes.append(sum(curr_list_sizes))
+
+                # Reset the current batch.
+                curr_list_sizes = [curr_size]
+                curr_list_sample_indices = [curr_sample_index]
+
+        # Store any remaining samples.
+        if len(curr_list_sample_indices) > 0:
+            self.curr_batches.append(curr_list_sample_indices)
+            debug_sizes.append(sum(curr_list_sizes))
+
+        # Shuffle the batches.
+        if self.shuffle:
+            shuffle_indices = torch.randperm(len(self.curr_batches), generator=self.generator).tolist()
+            curr_batches_ = [self.curr_batches[x] for x in shuffle_indices]
+            self.curr_batches = curr_batches_
+
+        # Sanity check that we have the correct number of samples after iteration.
+        assert sum(debug_sizes) == sizes.sum().item(), "Mismatch between number of samples and expected size of samples."
+
+    def __iter__(self):
+        # Yield the batches we created.
+        for batch in self.curr_batches:
+            yield batch
+
+        # Resample for the next epoch, and create new batches.
+        self.sample_clusters()
+        self.construct_batches()
+
+
+class JerryDatasetSampler(Sampler):
+    def __init__(
+        self, dataset: UnclusteredProteinChainDataset, params: dict, is_train: bool, seed: Optional[int] = None, 
+        max_protein_length: int = 10_000, subset_pdb_code_list: Optional[list] = None
+    ):
+        # Set the random seed for reproducibility and consistent randomness between processes if parallelized.
+        if seed is None:
+            self.generator = torch.Generator(device='cpu')
+        else:
+            self.generator = torch.Generator().manual_seed(seed)
+
+        # The unclustered dataset where each complex/assembly is a single index.
+        self.dataset = dataset
+        self.batch_size = params['batch_size']
+        self.shuffle = params['sample_randomly']
+        self.max_protein_length = max_protein_length
+        self.subset_pdbs = subset_pdb_code_list
+
+        # Load the cluster data.
+        sequence_clusters = pd.read_pickle(params['clustering_dataframe_path'])
+        self.subclusters_info = pd.read_pickle(params['subcluster_pickle_path'])
+
+        # self.membrane_pdb_codes = set(
+        #     read_flat_csv('/home/nickhedu/programs/LASErMPNN/membrane_pdbs_chunk1.csv') + 
+        #     read_flat_csv('/home/nickhedu/programs/LASErMPNN/membrane_pdbs_chunk2.csv')
+        # )
+
+        self.membrane_pdb_codes = set(
+            read_flat_csv('/home/nickhedu/programs/LASErMPNN/3wfh_combine_list.txt')
+        )
+
+        self.is_train = is_train
+        self.train_codes = ligandmpnn_training_pdb_codes
+        self.val_codes = ligandmpnn_validation_pdb_codes
+        self.test_codes = ligandmpnn_test_pdb_codes
+
+        # Maps sequence cluster to number of chains and vice versa
+        self.chain_to_cluster = sequence_clusters.set_index('chain').to_dict()['cluster_representative']
+        self.cluster_to_chains = invert_dict(self.chain_to_cluster)
+        
+        # Load relevant pickled sets of cluster keys, filter for train/test as necessary.
+        self.cluster_to_chains, self.subclusters_info = self.filter_clusters()
+
+        # Sample for the first epoch, subsequent epochs will resample after iteration over samples is complete.
+        self.curr_samples = []
+        self.sample_clusters()
+
+        self.curr_batches = []
+        self.construct_batches()
+
+    def __len__(self) -> int:
+        """
+        Returns number of batches in the current epoch.
+        """
+        return len(self.curr_batches)
+
+    def filter_clusters(self) -> Tuple[dict, dict]:
+        """
+        Filter clusters based on the given dataset sampler and the max protein length.
+            Parameters:
+            - is_test_dataset_sampler (bool): True if the dataset sampler is for the test dataset, False otherwise.
+
+            Returns:
+            - dict: A dictionary containing the filtered clusters.
+
+        """
+
+        print(len(self.subclusters_info), "clusters before filtering for soluble proteins.")
+        contaminated_clusters = []
+        if self.is_train:
+            output2 = defaultdict(lambda: defaultdict(list))
+            for cluster, subcluster_dict in self.subclusters_info.items():
+                if cluster in self.cluster_to_chains:
+                    for subcluster_centroid, subcluster_list in subcluster_dict.items():
+                        for subcluster_entry in subcluster_list:
+                            # Ensure chain is in the dataset, not a membrane protein, and below max length.
+                            if subcluster_entry in self.cluster_to_chains[cluster] and subcluster_entry in self.dataset.chain_key_to_index and not subcluster_entry.split('_')[0] in self.membrane_pdb_codes:
+                                output2[cluster][subcluster_centroid].append(subcluster_entry)
+                            elif subcluster_entry.split('_')[0] in self.membrane_pdb_codes:
+                                contaminated_clusters.append(cluster)
+
+            for cluster in contaminated_clusters:
+                if cluster in output2:
+                    del output2[cluster]
+            
+            print(len(output2), "clusters after filtering for soluble proteins.")
+            return self.cluster_to_chains, output2
+        else:
+            # No test set.
+            return  {}, {}
     
     def sample_clusters(self) -> None:
         """
