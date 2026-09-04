@@ -31,20 +31,6 @@ class Sampled_Output:
     def to(self, device: torch.device) -> 'Sampled_Output':
         return Sampled_Output(self.sequence_logits.to(device), self.chi_logits.to(device), self.sampled_sequence_indices.to(device), self.sampled_chi_encoding.to(device), self.sampled_chi_degrees.to(device))
 
-@dataclass
-class Sampled_Output:
-    """
-    Stores the output of a sample from the model.
-    """
-    sequence_logits: torch.Tensor
-    chi_logits: torch.Tensor
-    sampled_sequence_indices: torch.Tensor
-    sampled_chi_encoding: torch.Tensor
-    sampled_chi_degrees: torch.Tensor
-
-    def to(self, device: torch.device) -> 'Sampled_Output':
-        return Sampled_Output(self.sequence_logits.to(device), self.chi_logits.to(device), self.sampled_sequence_indices.to(device), self.sampled_chi_encoding.to(device), self.sampled_chi_degrees.to(device))
-
 def create_sampling_output(num_residues: int, num_chi_bins: int, device: torch.device) -> Sampled_Output:
     """
     Initializes the output tensors to zeros.
